@@ -47,7 +47,7 @@ func main() {
 			return
 		}
 
-		fmt.Printf("database page size: %v", pageSize)
+		fmt.Printf("database page size: %v\n", pageSize)
 		fmt.Printf("number of tables: %v", tableCount)
 	default:
 		fmt.Println("Unknown command", command)
