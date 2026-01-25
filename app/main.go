@@ -30,15 +30,25 @@ func main() {
 		}
 
 		var pageSize uint16
-		if err := binary.Read(bytes.NewReader(header[16:18]), binary.BigEndian, &pageSize); err != nil {
+		if err = binary.Read(bytes.NewReader(header[16:18]), binary.BigEndian, &pageSize); err != nil {
 			fmt.Println("Failed to read integer:", err)
 			return
 		}
-		// You can use print statements as follows for debugging, they'll be visible when running tests.
-		fmt.Fprintln(os.Stderr, "Logs from your program will appear here!")
 
-		// TODO: Uncomment the code below to pass the first stage
+		pageHeader := make([]byte, 12)
+		_, err = databaseFile.Read(pageHeader)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		var tableCount uint16
+		if err := binary.Read(bytes.NewReader(pageHeader[3:5]), binary.BigEndian, &tableCount); err != nil {
+			fmt.Println("Failed to read integer:", err)
+			return
+		}
+
 		fmt.Printf("database page size: %v", pageSize)
+		fmt.Printf("number of tables: %v", tableCount)
 	default:
 		fmt.Println("Unknown command", command)
 		os.Exit(1)
