@@ -66,8 +66,8 @@ func TestNewPageParsesLeafTable(t *testing.T) {
 		t.Fatalf("unexpected cell addresses count: got %d, want %d", len(page.CellAddresses), expectedCells)
 	}
 
-	if len(page.Data) != int(page.PageSize) {
-		t.Fatalf("unexpected page data length: got %d, want %d", len(page.Data), page.PageSize)
+	if len(page.Data) != int(header.PageSize) {
+		t.Fatalf("unexpected page data length: got %d, want %d", len(page.Data), header.PageSize)
 	}
 }
 

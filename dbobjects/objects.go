@@ -36,9 +36,9 @@ type DatabaseHeader struct {
 }
 
 type Page struct {
-	PageSize      uint16
 	PageType      BTreePageType
 	PageStart     int64
+	ContentOffset int
 	CellCount     uint16
 	CellAddresses []uint16
 	Data          []byte
@@ -54,6 +54,23 @@ type Row struct {
 type Column struct {
 	SerialType   uint64
 	DecodedValue any
+}
+
+func SqliteSchemaCol(name string) int {
+	switch name {
+	case "type":
+		return 0
+	case "name":
+		return 1
+	case "tbl_name":
+		return 2
+	case "rootpage":
+		return 3
+	case "sql":
+		return 4
+	default:
+		panic("unknown sqlite_schema column: " + name)
+	}
 }
 
 func (databaseFile *DatabaseFile) NewDatabaseHeader() (*DatabaseHeader, error) {
@@ -73,15 +90,15 @@ func (databaseFile *DatabaseFile) NewDatabaseHeader() (*DatabaseHeader, error) {
 }
 
 func (databaseFile *DatabaseFile) NewPage(databaseHeader *DatabaseHeader, pageNumber uint32) (*Page, error) {
-	start, size, err := pageBounds(databaseHeader, pageNumber)
+	start, pageSize, contentOffset, err := pageBounds(databaseHeader, pageNumber)
 	if err != nil {
 		return nil, err
 	}
 
-	page := &Page{PageStart: start, PageSize: size}
-	page.Data = make([]byte, page.PageSize)
+	page := &Page{PageStart: start, ContentOffset: contentOffset}
+	page.Data = make([]byte, pageSize)
 
-	sectionReader := io.NewSectionReader(databaseFile, page.PageStart, int64(page.PageSize))
+	sectionReader := io.NewSectionReader(databaseFile, page.PageStart, int64(pageSize))
 	if _, err := io.ReadFull(sectionReader, page.Data); err != nil {
 		return nil, fmt.Errorf("page %d: read bytes: %w", pageNumber, err)
 	}
@@ -90,8 +107,13 @@ func (databaseFile *DatabaseFile) NewPage(databaseHeader *DatabaseHeader, pageNu
 		return nil, fmt.Errorf("page %d: no data", pageNumber)
 	}
 
-	typeFlag := page.Data[0]
-	offset := 1
+	offset := page.ContentOffset
+	if offset >= len(page.Data) {
+		return nil, fmt.Errorf("page %d: content offset beyond data", pageNumber)
+	}
+
+	typeFlag := page.Data[offset]
+	offset++
 	var headerLen int
 
 	switch BTreePageType(typeFlag) {
@@ -220,23 +242,25 @@ func ReadAllRows(page *Page) ([]*Row, error) {
 	return rows, nil
 }
 
-func pageBounds(databaseHeader *DatabaseHeader, pageNumber uint32) (int64, uint16, error) {
+func pageBounds(databaseHeader *DatabaseHeader, pageNumber uint32) (start int64, size uint16, contentOffset int, err error) {
 	if databaseHeader == nil {
-		return 0, 0, fmt.Errorf("database header is nil")
+		return 0, 0, 0, fmt.Errorf("database header is nil")
 	}
 
 	if pageNumber == 0 {
-		return 0, 0, fmt.Errorf("page number must be greater than 0")
+		return 0, 0, 0, fmt.Errorf("page number must be greater than 0")
 	}
 
+	size = databaseHeader.PageSize
 	if pageNumber == 1 {
-		if databaseHeader.PageSize <= databaseHeaderBytes {
-			return 0, 0, fmt.Errorf("page size %d too small for header", databaseHeader.PageSize)
+		if size <= databaseHeaderBytes {
+			return 0, 0, 0, fmt.Errorf("page size %d too small for header", size)
 		}
-		return databaseHeaderBytes, databaseHeader.PageSize - databaseHeaderBytes, nil
+		return 0, size, databaseHeaderBytes, nil
 	}
 
-	return int64(pageNumber-1) * int64(databaseHeader.PageSize), databaseHeader.PageSize, nil
+	start = int64(pageNumber-1) * int64(size)
+	return start, size, 0, nil
 }
 
 func columnRawValueLength(serialType uint64) (int, error) {
