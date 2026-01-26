@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"slices"
 )
 
 type BTreePageType uint8
@@ -37,8 +36,9 @@ type Page struct {
 	PageSize      uint16
 	PageType      BTreePageType
 	PageStart     int64
-	CellCount     uint32
+	CellCount     uint16
 	CellAddresses []uint16
+	Data          []byte
 }
 
 type Row struct {
@@ -74,124 +74,134 @@ func (databaseFile *DatabaseFile) NewDatabaseHeader() (*DatabaseHeader, error) {
 }
 
 func (databaseFile *DatabaseFile) NewPage(databaseHeader *DatabaseHeader, pageNumber uint32) (*Page, error) {
-	var page Page
+	if pageNumber == 0 {
+		return nil, fmt.Errorf("page number must be greater than 0")
+	}
+
+	page := &Page{}
 
 	switch pageNumber {
-	case 0:
-		return nil, fmt.Errorf("page number must be greater than 0")
 	case 1:
-		page.PageStart = 100 + (int64(pageNumber-1) * int64(databaseHeader.PageSize))
+		page.PageStart = 100
 		page.PageSize = databaseHeader.PageSize - 100
 	default:
-		page.PageStart = 100 + (int64(pageNumber-1) * int64(databaseHeader.PageSize))
+		page.PageStart = int64(pageNumber-1) * int64(databaseHeader.PageSize)
 		page.PageSize = databaseHeader.PageSize
 	}
 
-	// Extract page type from page header
-	typeFlag := make([]byte, 1)
-
-	if _, err := databaseFile.Seek(page.PageStart, io.SeekStart); err != nil {
-		return nil, fmt.Errorf("failed to seek to the beginning of the file: %w", err)
+	page.Data = make([]byte, page.PageSize)
+	sectionReader := io.NewSectionReader(databaseFile, page.PageStart, int64(page.PageSize))
+	if _, err := io.ReadFull(sectionReader, page.Data); err != nil {
+		return nil, fmt.Errorf("failed to read page bytes: %w", err)
 	}
 
-	if n, err := databaseFile.Read(typeFlag); err != nil || n != 1 {
-		return nil, fmt.Errorf("failed to read page type (bytes read: %d): %w", n, err)
+	if len(page.Data) == 0 {
+		return nil, fmt.Errorf("page %d contains no data", pageNumber)
 	}
 
-	// Decode the page header type & determine page header length in bytes
-	var header []byte
-	switch BTreePageType(typeFlag[0]) {
+	typeFlag := page.Data[0]
+	offset := 1
+	var headerLen int
+
+	switch BTreePageType(typeFlag) {
 	case InteriorIndex:
 		page.PageType = InteriorIndex
-		header = make([]byte, 12)
+		headerLen = 11
 	case InteriorTable:
 		page.PageType = InteriorTable
-		header = make([]byte, 12)
+		headerLen = 11
 	case LeafIndex:
 		page.PageType = LeafIndex
-		header = make([]byte, 8)
+		headerLen = 7
 	case LeafTable:
 		page.PageType = LeafTable
-		header = make([]byte, 8)
+		headerLen = 7
 	default:
-		return nil, fmt.Errorf("unknown page type: %d", typeFlag[0])
+		return nil, fmt.Errorf("unknown page type: %d", typeFlag)
 	}
 
-	if n, err := databaseFile.Read(header); err != nil || n != len(header) {
-		return nil, fmt.Errorf("failed to read page header (bytes read: %d): %w", n, err)
+	if len(page.Data) < offset+headerLen {
+		return nil, fmt.Errorf("page %d header truncated", pageNumber)
+	}
+	header := page.Data[offset : offset+headerLen]
+	offset += headerLen
+
+	page.CellCount = binary.BigEndian.Uint16(header[2:4])
+	pointerBytes := int(page.CellCount) * 2
+	if len(page.Data) < offset+pointerBytes {
+		return nil, fmt.Errorf("page %d cell pointer array truncated", pageNumber)
 	}
 
-	// Extract cell count from page header
-	if err := binary.Read(bytes.NewReader(header[3:5]), binary.BigEndian, &page.CellCount); err != nil {
-		return nil, fmt.Errorf("failed to read cell count: %w", err)
+	page.CellAddresses = make([]uint16, 0, page.CellCount)
+	for i := 0; i < pointerBytes; i += 2 {
+		page.CellAddresses = append(page.CellAddresses, binary.BigEndian.Uint16(page.Data[offset+i:offset+i+2]))
 	}
 
-	// Extract cell addresses from cell pointer array
-	cellPointerArr := make([]byte, 2*page.CellCount)
-	if n, err := databaseFile.Read(cellPointerArr); err != nil || n != len(cellPointerArr) {
-		return nil, fmt.Errorf("failed to read cell pointer array (bytes read: %d): %w", n, err)
-	}
-	for i := 0; i < len(cellPointerArr); i = i + 2 {
-		page.CellAddresses = append(page.CellAddresses, binary.BigEndian.Uint16(cellPointerArr[i:i+2]))
-	}
-	slices.Sort(page.CellAddresses)
+	return page, nil
+}
 
-	return &page, nil
+func ReadRow(page *Page, cellIndex int) (*Row, error) {
+	if page == nil {
+		return nil, fmt.Errorf("page is nil")
+	}
+
+	cellData, err := CellData(page, cellIndex)
+	if err != nil {
+		return nil, err
+	}
+
+	row := &Row{}
+	cellReader := bufio.NewReader(bytes.NewReader(cellData))
+
+	recordSize, _, err := ReadVarint(cellReader)
+	if err != nil {
+		return nil, fmt.Errorf("reading record size at cell %d: %w", cellIndex, err)
+	}
+	row.RecordSize = recordSize
+
+	rowID, _, err := ReadVarint(cellReader)
+	if err != nil {
+		return nil, fmt.Errorf("reading row ID at cell %d: %w", cellIndex, err)
+	}
+	row.RowID = rowID
+
+	headerSize, headerBytes, err := ReadVarint(cellReader)
+	if err != nil {
+		return nil, fmt.Errorf("reading header size at cell %d: %w", cellIndex, err)
+	}
+	row.RecordHeaderSize = headerSize
+
+	remainingHeaderBytes := int64(row.RecordHeaderSize) - int64(headerBytes)
+	if remainingHeaderBytes < 0 {
+		return nil, fmt.Errorf("negative header size at cell %d (headerSize=%d, headerBytes=%d)", cellIndex, row.RecordHeaderSize, headerBytes)
+	}
+
+	serialReader := bufio.NewReader(io.LimitReader(cellReader, remainingHeaderBytes))
+
+	for {
+		serialType, _, err := ReadVarint(serialReader)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reading serial type at cell %d: %w", cellIndex, err)
+		}
+		row.Columns = append(row.Columns, Column{SerialType: serialType})
+	}
+
+	// TODO: Read data for each column
+
+	return row, nil
 }
 
 func (databaseFile *DatabaseFile) ReadAllRows(page *Page) ([]*Row, error) {
 	rows := make([]*Row, 0, page.CellCount)
 
-	for i := uint32(0); i < page.CellCount; i++ {
-		row := &Row{}
-		recordStart := page.PageStart + int64(page.CellAddresses[i])
-
-		// Seek to cell start
-		if _, err := databaseFile.Seek(recordStart, io.SeekStart); err != nil {
-			return nil, fmt.Errorf("seeking to cell %d: %w", i, err)
-		}
-		cellReader := bufio.NewReaderSize(databaseFile, int(page.PageSize))
-
-		// Read record header varints
-		var consumed, n int
-		recordSize, n, err := ReadVarint(cellReader)
+	for i := 0; i < int(page.CellCount); i++ {
+		row, err := ReadRow(page, i)
 		if err != nil {
-			return nil, fmt.Errorf("reading record size at cell %d: %w", i, err)
+			return nil, err
 		}
-		row.RecordSize = recordSize
-		consumed += n
-
-		rowID, n, err := ReadVarint(cellReader)
-		if err != nil {
-			return nil, fmt.Errorf("reading row ID at cell %d: %w", i, err)
-		}
-		row.RowID = rowID
-		consumed += n
-
-		headerSize, n, err := ReadVarint(cellReader)
-		if err != nil {
-			return nil, fmt.Errorf("reading header size at cell %d: %w", i, err)
-		}
-		row.RecordHeaderSize = headerSize
-		consumed += n
-
-		// Read serial types for all columns
-		remainingHeaderBytes := int64(row.RecordHeaderSize) - int64(consumed)
-		serialReader := bufio.NewReader(io.LimitReader(cellReader, remainingHeaderBytes))
-
-		for {
-			serialType, _, err := ReadVarint(serialReader)
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				return nil, fmt.Errorf("reading serial type at cell %d: %w", i, err)
-			}
-			row.Columns = append(row.Columns, Column{SerialType: serialType})
-		}
-
-		// TODO: Read data for each column
-
 		rows = append(rows, row)
 	}
 
