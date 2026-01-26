@@ -22,15 +22,15 @@ func main() {
 			log.Fatal(err)
 		}
 
-		header := make([]byte, 100)
+		databaseHeader := make([]byte, 100)
 
-		_, err = databaseFile.Read(header)
+		_, err = databaseFile.Read(databaseHeader)
 		if err != nil {
 			log.Fatal(err)
 		}
 
 		var pageSize uint16
-		if err = binary.Read(bytes.NewReader(header[16:18]), binary.BigEndian, &pageSize); err != nil {
+		if err = binary.Read(bytes.NewReader(databaseHeader[16:18]), binary.BigEndian, &pageSize); err != nil {
 			fmt.Println("Failed to read integer:", err)
 			return
 		}
