@@ -11,6 +11,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"os"
 )
 
@@ -51,8 +52,8 @@ type Row struct {
 }
 
 type Column struct {
-	SerialType uint64
-	Data       []byte
+	SerialType   uint64
+	DecodedValue any
 }
 
 func (databaseFile *DatabaseFile) NewDatabaseHeader() (*DatabaseHeader, error) {
@@ -141,8 +142,9 @@ func ReadRow(page *Page, cellIndex int) (*Row, error) {
 	}
 
 	row := &Row{}
-	cellReader := bufio.NewReader(bytes.NewReader(cellData))
 
+	// Read row metadata
+	cellReader := bufio.NewReader(bytes.NewReader(cellData))
 	recordSize, _, err := ReadVarint(cellReader)
 	if err != nil {
 		return nil, fmt.Errorf("cell %d: read record size: %w", cellIndex, err)
@@ -166,8 +168,8 @@ func ReadRow(page *Page, cellIndex int) (*Row, error) {
 		return nil, fmt.Errorf("cell %d: negative header size (size=%d, bytes=%d)", cellIndex, row.RecordHeaderSize, headerBytes)
 	}
 
+	// Read serial types into each column
 	serialReader := bufio.NewReader(io.LimitReader(cellReader, remainingHeaderBytes))
-
 	for {
 		serialType, _, err := ReadVarint(serialReader)
 		if err == io.EOF {
@@ -179,15 +181,35 @@ func ReadRow(page *Page, cellIndex int) (*Row, error) {
 		row.Columns = append(row.Columns, Column{SerialType: serialType})
 	}
 
-	// TODO: Read data for each column
+	// Read column values into each column
+	for i := range row.Columns {
+		length, err := columnRawValueLength(row.Columns[i].SerialType)
+		if err != nil {
+			return nil, fmt.Errorf("cell %d: column %d: %w", cellIndex, i, err)
+		}
+
+		var payload []byte
+		if length > 0 {
+			payload = make([]byte, length)
+			if _, err := io.ReadFull(cellReader, payload); err != nil {
+				return nil, fmt.Errorf("cell %d: read column %d payload: %w", cellIndex, i, err)
+			}
+		}
+
+		value, err := decodeColumnValue(row.Columns[i].SerialType, payload)
+		if err != nil {
+			return nil, fmt.Errorf("cell %d: column %d: %w", cellIndex, i, err)
+		}
+		row.Columns[i].DecodedValue = value
+	}
 
 	return row, nil
 }
 
-func (databaseFile *DatabaseFile) ReadAllRows(page *Page) ([]*Row, error) {
+func ReadAllRows(page *Page) ([]*Row, error) {
 	rows := make([]*Row, 0, int(page.CellCount))
 
-	for i := range int(page.CellCount) {
+	for i := 0; i < int(page.CellCount); i++ {
 		row, err := ReadRow(page, i)
 		if err != nil {
 			return nil, err
@@ -215,4 +237,75 @@ func pageBounds(databaseHeader *DatabaseHeader, pageNumber uint32) (int64, uint1
 	}
 
 	return int64(pageNumber-1) * int64(databaseHeader.PageSize), databaseHeader.PageSize, nil
+}
+
+func columnRawValueLength(serialType uint64) (int, error) {
+	switch serialType {
+	case 0, 8, 9:
+		return 0, nil
+	case 1:
+		return 1, nil
+	case 2:
+		return 2, nil
+	case 3:
+		return 3, nil
+	case 4:
+		return 4, nil
+	case 5:
+		return 6, nil
+	case 6, 7:
+		return 8, nil
+	case 10, 11:
+		return 0, fmt.Errorf("reserved serial type %d", serialType)
+	}
+
+	if serialType >= 12 {
+		if serialType%2 == 0 {
+			return int((serialType - 12) / 2), nil
+		}
+		return int((serialType - 13) / 2), nil
+	}
+
+	return 0, fmt.Errorf("unsupported serial type %d", serialType)
+}
+
+func decodeColumnValue(serialType uint64, raw []byte) (any, error) {
+	expectedLen, err := columnRawValueLength(serialType)
+	if err != nil {
+		return nil, err
+	}
+	if expectedLen != len(raw) {
+		return nil, fmt.Errorf("serial type %d expects %d bytes, got %d", serialType, expectedLen, len(raw))
+	}
+
+	switch serialType {
+	case 0:
+		return nil, nil
+	case 1, 2, 3, 4, 5, 6:
+		return decodeSignedInteger(raw), nil
+	case 7:
+		return math.Float64frombits(binary.BigEndian.Uint64(raw)), nil
+	case 8:
+		return int64(0), nil
+	case 9:
+		return int64(1), nil
+	}
+
+	if serialType >= 12 {
+		if serialType%2 == 0 {
+			return append([]byte(nil), raw...), nil
+		}
+		return string(raw), nil
+	}
+
+	return nil, fmt.Errorf("unsupported serial type %d", serialType)
+}
+
+func decodeSignedInteger(raw []byte) int64 {
+	var value int64
+	for _, b := range raw {
+		value = (value << 8) | int64(b)
+	}
+	shift := (8 - len(raw)) * 8
+	return int64(uint64(value<<shift) >> shift)
 }

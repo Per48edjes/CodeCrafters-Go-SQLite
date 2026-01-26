@@ -79,7 +79,7 @@ func TestReadAllRowsFromSampleApples(t *testing.T) {
 		t.Fatalf("reading page: %v", err)
 	}
 
-	rows, err := dbFile.ReadAllRows(page)
+	rows, err := ReadAllRows(page)
 	if err != nil {
 		t.Fatalf("reading rows: %v", err)
 	}
@@ -93,6 +93,23 @@ func TestReadAllRowsFromSampleApples(t *testing.T) {
 	for i, row := range rows {
 		if len(row.Columns) != expectedColumns {
 			t.Fatalf("row %d unexpected column count: got %d, want %d", i, len(row.Columns), expectedColumns)
+		}
+	}
+
+	expectedNames := []string{"Granny Smith", "Fuji", "Honeycrisp", "Golden Delicious"}
+	expectedColors := []string{"Light Green", "Red", "Blush Red", "Yellow"}
+
+	for i, row := range rows {
+		if row.RowID != uint64(i+1) {
+			t.Fatalf("row %d unexpected rowid: got %d, want %d", i, row.RowID, i+1)
+		}
+
+		if nameValue := row.Columns[1].DecodedValue.(string); nameValue != expectedNames[i] {
+			t.Fatalf("row %d unexpected name: got %q, want %q", i, nameValue, expectedNames[i])
+		}
+
+		if colorValue := row.Columns[2].DecodedValue.(string); colorValue != expectedColors[i] {
+			t.Fatalf("row %d unexpected color: got %q, want %q", i, colorValue, expectedColors[i])
 		}
 	}
 }
