@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -29,11 +28,7 @@ func main() {
 			log.Fatal(err)
 		}
 
-		var pageSize uint16
-		if err = binary.Read(bytes.NewReader(databaseHeader[16:18]), binary.BigEndian, &pageSize); err != nil {
-			fmt.Println("Failed to read integer:", err)
-			return
-		}
+		pageSize := binary.BigEndian.Uint16(databaseHeader[16:18])
 
 		pageHeader := make([]byte, 12)
 		_, err = databaseFile.Read(pageHeader)
@@ -41,11 +36,7 @@ func main() {
 			log.Fatal(err)
 		}
 
-		var tableCount uint16
-		if err := binary.Read(bytes.NewReader(pageHeader[3:5]), binary.BigEndian, &tableCount); err != nil {
-			fmt.Println("Failed to read integer:", err)
-			return
-		}
+		tableCount := binary.BigEndian.Uint16(pageHeader[3:5])
 
 		fmt.Printf("database page size: %v\n", pageSize)
 		fmt.Printf("number of tables: %v", tableCount)
