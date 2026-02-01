@@ -1,9 +1,4 @@
-/*
-Package dbobjects reads bytes from a SQLite database file into objects
-defined herein and provides functionality to perform operations on said objects
-in application code.
-*/
-package dbobjects
+package db
 
 import (
 	"bufio"
@@ -12,37 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"os"
 )
-
-type BTreePageType uint8
-
-type DatabaseFile struct {
-	*os.File
-}
-
-const (
-	InteriorIndex BTreePageType = 2
-	InteriorTable BTreePageType = 5
-	LeafIndex     BTreePageType = 10
-	LeafTable     BTreePageType = 13
-
-	databaseHeaderBytes = 100
-)
-
-type DatabaseHeader struct {
-	PageSize  uint16
-	PageCount uint32
-}
-
-type Page struct {
-	PageType      BTreePageType
-	PageStart     int64
-	ContentOffset int
-	CellCount     uint16
-	CellAddresses []uint16
-	Data          []byte
-}
 
 type Row struct {
 	RecordSize       uint64
@@ -56,101 +21,37 @@ type Column struct {
 	DecodedValue any
 }
 
-func SqliteSchemaCol(name string) int {
-	switch name {
-	case "type":
-		return 0
-	case "name":
-		return 1
-	case "tbl_name":
-		return 2
-	case "rootpage":
-		return 3
-	case "sql":
-		return 4
-	default:
-		panic("unknown sqlite_schema column: " + name)
+func CellOffset(page *Page, cellIndex int) (int, error) {
+	if page == nil {
+		return 0, fmt.Errorf("page is nil")
 	}
+
+	if cellIndex < 0 {
+		return 0, fmt.Errorf("cell index %d out of range", cellIndex)
+	}
+
+	if cellIndex >= int(page.CellCount) {
+		return 0, fmt.Errorf("cell index %d out of range", cellIndex)
+	}
+
+	if cellIndex >= len(page.CellAddresses) {
+		return 0, fmt.Errorf("missing cell address for index %d", cellIndex)
+	}
+
+	return int(page.CellAddresses[cellIndex]), nil
 }
 
-func (databaseFile *DatabaseFile) NewDatabaseHeader() (*DatabaseHeader, error) {
-	if _, err := databaseFile.Seek(0, io.SeekStart); err != nil {
-		return nil, fmt.Errorf("seek database start: %w", err)
-	}
-
-	header := make([]byte, databaseHeaderBytes)
-	var databaseHeader DatabaseHeader
-
-	if n, err := databaseFile.Read(header); err != nil || n != databaseHeaderBytes {
-		return nil, fmt.Errorf("read database header (%d bytes): %w", n, err)
-	}
-
-	databaseHeader.PageSize = binary.BigEndian.Uint16(header[16:18])
-	return &databaseHeader, nil
-}
-
-func (databaseFile *DatabaseFile) NewPage(databaseHeader *DatabaseHeader, pageNumber uint32) (*Page, error) {
-	start, pageSize, contentOffset, err := pageBounds(databaseHeader, pageNumber)
+func CellData(page *Page, cellIndex int) ([]byte, error) {
+	offset, err := CellOffset(page, cellIndex)
 	if err != nil {
 		return nil, err
 	}
 
-	page := &Page{PageStart: start, ContentOffset: contentOffset}
-	page.Data = make([]byte, pageSize)
-
-	sectionReader := io.NewSectionReader(databaseFile, page.PageStart, int64(pageSize))
-	if _, err := io.ReadFull(sectionReader, page.Data); err != nil {
-		return nil, fmt.Errorf("page %d: read bytes: %w", pageNumber, err)
-	}
-
-	if len(page.Data) == 0 {
-		return nil, fmt.Errorf("page %d: no data", pageNumber)
-	}
-
-	offset := page.ContentOffset
 	if offset >= len(page.Data) {
-		return nil, fmt.Errorf("page %d: content offset beyond data", pageNumber)
+		return nil, fmt.Errorf("cell offset %d exceeds page data", offset)
 	}
 
-	typeFlag := page.Data[offset]
-	offset++
-	var headerLen int
-
-	switch BTreePageType(typeFlag) {
-	case InteriorIndex:
-		page.PageType = InteriorIndex
-		headerLen = 11
-	case InteriorTable:
-		page.PageType = InteriorTable
-		headerLen = 11
-	case LeafIndex:
-		page.PageType = LeafIndex
-		headerLen = 7
-	case LeafTable:
-		page.PageType = LeafTable
-		headerLen = 7
-	default:
-		return nil, fmt.Errorf("page %d: unknown type %d", pageNumber, typeFlag)
-	}
-
-	if len(page.Data) < offset+headerLen {
-		return nil, fmt.Errorf("page %d: header truncated", pageNumber)
-	}
-	header := page.Data[offset : offset+headerLen]
-	offset += headerLen
-
-	page.CellCount = binary.BigEndian.Uint16(header[2:4])
-	pointerBytes := int(page.CellCount) * 2
-	if len(page.Data) < offset+pointerBytes {
-		return nil, fmt.Errorf("page %d: cell pointer array truncated", pageNumber)
-	}
-
-	page.CellAddresses = make([]uint16, 0, page.CellCount)
-	for i := 0; i < pointerBytes; i += 2 {
-		page.CellAddresses = append(page.CellAddresses, binary.BigEndian.Uint16(page.Data[offset+i:offset+i+2]))
-	}
-
-	return page, nil
+	return page.Data[offset:], nil
 }
 
 func ReadRow(page *Page, cellIndex int) (*Row, error) {
@@ -240,27 +141,6 @@ func ReadAllRows(page *Page) ([]*Row, error) {
 	}
 
 	return rows, nil
-}
-
-func pageBounds(databaseHeader *DatabaseHeader, pageNumber uint32) (start int64, size uint16, contentOffset int, err error) {
-	if databaseHeader == nil {
-		return 0, 0, 0, fmt.Errorf("database header is nil")
-	}
-
-	if pageNumber == 0 {
-		return 0, 0, 0, fmt.Errorf("page number must be greater than 0")
-	}
-
-	size = databaseHeader.PageSize
-	if pageNumber == 1 {
-		if size <= databaseHeaderBytes {
-			return 0, 0, 0, fmt.Errorf("page size %d too small for header", size)
-		}
-		return 0, size, databaseHeaderBytes, nil
-	}
-
-	start = int64(pageNumber-1) * int64(size)
-	return start, size, 0, nil
 }
 
 func columnRawValueLength(serialType uint64) (int, error) {

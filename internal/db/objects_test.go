@@ -1,4 +1,4 @@
-package dbobjects
+package db
 
 import (
 	"os"
@@ -10,7 +10,7 @@ func sampleDatabasePath() string {
 	if path := os.Getenv("SAMPLE_DB_PATH"); path != "" {
 		return path
 	}
-	return filepath.Join("..", "sample.db")
+	return filepath.Join("..", "..", "sample.db")
 }
 
 func openSampleDatabase(t *testing.T) (*DatabaseFile, *DatabaseHeader) {
