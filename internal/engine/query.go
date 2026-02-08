@@ -7,31 +7,45 @@ import (
 	"github.com/xwb1989/sqlparser"
 )
 
-func TableNameFromQuery(query string) (string, error) {
-	stmt, err := sqlparser.Parse(query)
+func ExtractTableColumnIndices(schemaPage *db.Page, table string) (map[string]int, error) {
+	sql, err := db.MetadataLookup[string](schemaPage, table, "sql")
 	if err != nil {
-		return "", fmt.Errorf("parse query: %w", err)
+		return nil, err
+	}
+
+	stmt, err := sqlparser.Parse(sql)
+	if err != nil {
+		return nil, fmt.Errorf("parse query: %w", err)
 	}
 
 	switch stmt := stmt.(type) {
-	case *sqlparser.Select:
-		for _, expr := range stmt.From {
-			ate, ok := expr.(*sqlparser.AliasedTableExpr)
-			if !ok {
-				continue
-			}
-
-			tbl, ok := ate.Expr.(sqlparser.TableName)
-			if !ok {
-				continue
-			}
-
-			return tbl.Name.String(), nil
+	case *sqlparser.DDL:
+		colMap := make(map[string]int, len(stmt.TableSpec.Columns))
+		for i, col := range stmt.TableSpec.Columns {
+			colMap[col.Name.CompliantName()] = i
 		}
-		return "", fmt.Errorf("select query missing table")
+		return colMap, nil
 	}
 
-	return "", fmt.Errorf("unsupported query type: %T", stmt)
+	return nil, fmt.Errorf("unsupported query type: %T", stmt)
+}
+
+func TableNameFromQuery(s *sqlparser.Select) (string, error) {
+	for _, expr := range s.From {
+		ate, ok := expr.(*sqlparser.AliasedTableExpr)
+		if !ok {
+			continue
+		}
+
+		tbl, ok := ate.Expr.(sqlparser.TableName)
+		if !ok {
+			continue
+		}
+
+		// NOTE: Gets the first table name in a FROM clause
+		return tbl.Name.String(), nil
+	}
+	return "", fmt.Errorf("select query missing table")
 }
 
 func RowCount(path, tableName string) (uint16, error) {
@@ -40,7 +54,7 @@ func RowCount(path, tableName string) (uint16, error) {
 		return 0, err
 	}
 
-	rootPageNum, err := db.RootPageLookup(tableName, schemaPage)
+	rootPageNum, err := db.MetadataLookup[uint32](schemaPage, tableName, "rootpage")
 	if err != nil {
 		return 0, err
 	}

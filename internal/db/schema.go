@@ -22,57 +22,59 @@ func SqliteSchemaCol(name string) int {
 	}
 }
 
-func ExtractTableNames(schemaPage *Page) ([]string, error) {
+func ExtractTableMetadata[T string | uint32](schemaPage *Page, col string) ([]T, error) {
 	rows, err := ReadAllRows(schemaPage)
 	if err != nil {
 		return nil, fmt.Errorf("read schema rows: %w", err)
 	}
 
-	tblNameIdx := SqliteSchemaCol("tbl_name")
-	names := make([]string, 0, len(rows))
+	metadataColIdx := SqliteSchemaCol(col)
+	var metadata []T
+	metadata = make([]T, 0, len(rows))
 
 	for _, row := range rows {
-		if tblNameIdx >= len(row.Columns) {
-			return nil, errors.New("tbl_name column missing in schema row")
+		if metadataColIdx >= len(row.Columns) {
+			return nil, fmt.Errorf("%s column missing in schema row", col)
 		}
 
-		name, ok := row.Columns[tblNameIdx].DecodedValue.(string)
+		md, ok := row.Columns[metadataColIdx].DecodedValue.(T)
 		if !ok {
-			return nil, fmt.Errorf("rowid %d: tbl_name is not text", row.RowID)
+			return nil, fmt.Errorf("rowid %d: is not text", row.RowID)
 		}
-		names = append(names, name)
+		metadata = append(metadata, md)
 	}
 
-	return names, nil
+	return metadata, nil
 }
 
-func RootPageLookup(tableName string, schemaPage *Page) (uint32, error) {
+func MetadataLookup[T string | uint32](schemaPage *Page, tableName string, col string) (T, error) {
+	var zero T
 	rows, err := ReadAllRows(schemaPage)
 	if err != nil {
-		return 0, fmt.Errorf("read schema rows: %w", err)
+		return zero, fmt.Errorf("read schema rows: %w", err)
 	}
 
 	tblNameIdx := SqliteSchemaCol("tbl_name")
-	rootPageIdx := SqliteSchemaCol("rootpage")
+	metadataColIdx := SqliteSchemaCol(col)
 
 	for _, row := range rows {
 		if tblNameIdx >= len(row.Columns) {
-			return 0, errors.New("tbl_name column missing in schema row")
+			return zero, errors.New("tbl_name column missing in schema row")
 		}
 
 		name, ok := row.Columns[tblNameIdx].DecodedValue.(string)
 		if !ok {
-			return 0, fmt.Errorf("rowid %d: tbl_name is not text", row.RowID)
+			return zero, fmt.Errorf("rowid %d: tbl_name is not text", row.RowID)
 		}
 
 		if name == tableName {
-			rootPage, ok := row.Columns[rootPageIdx].DecodedValue.(int64)
+			md, ok := row.Columns[metadataColIdx].DecodedValue.(T)
 			if !ok {
-				return 0, fmt.Errorf("rowid %d: rootpage is not int64", row.RowID)
+				return zero, fmt.Errorf("rowid %d: %s is not string or uint32", row.RowID, col)
 			}
-			return uint32(rootPage), nil
+			return md, nil
 		}
 	}
 
-	return 0, fmt.Errorf("table %s not found in schema", tableName)
+	return zero, fmt.Errorf("table %s not found in schema", tableName)
 }
